@@ -227,3 +227,7 @@ self.load_model()                              # --------please cancel annotate 
 ## Experimental results
 We have prepared scripts for pre-training and PM-MOE fine-tuning to reproduce the experimental results. If you are interested, you can reproduce this experimental result.
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> ed9d2f18ab23987fa3d18edcca00c289abc16c13
