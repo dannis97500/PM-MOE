@@ -35,12 +35,96 @@ class ToPMoE(nn.Module):
         # Assuming all experts have the same input dimension
         self.gating = Gating(gate_input_dim, num_experts)
         self.k = args.topk
+        self.args = args
+        self.energy_T=args.energy_T
+
+    def calConfidence(self, normalized_item):
+        
+        E_k = -normalized_item
+        # F_T^k(v^k) = -T * log(sum(exp(-E^k / T)))
+        exp_term = torch.exp(-E_k / self.energy_T)  # exp(-E^k / T)
+        sum_exp = torch.sum(exp_term)  # sum(exp(-E^k / T))
+        F_T_k = -self.energy_T * torch.log(sum_exp)  # -T * log(sum_exp)
+        H_k = -F_T_k
+
+        return H_k
+
+    def elementwise_cosine_similarity(self, x, y):
+        dot_product = x * y  
+        x_norm = torch.abs(x)  
+        y_norm = torch.abs(y)  
+        cosine_sim = dot_product / (x_norm * y_norm + 1e-8)  
+        return cosine_sim
+    
+    def forward(self, x): 
+        
+        # Get the weights from the gating network
+        weights = self.gating(x.flatten(1))  # [10,20]
+        
+        weights_values, indices = torch.topk(weights, self.k, dim=-1, largest=True, sorted=True, out=None) 
+        
+        filter_weights_values = []
+        # Calculate the expert
+        results = []
+        for i in range(x.size(0)):
+            expert_results = [self.experts[idx](x[i]) for idx in indices[i]] 
+            
+            rep_ori = self.experts[self.args.id](x[i]) # 10
+            
+            # epsilon = 1e-4
+            
+            # confidence_results = {}
+            energy_index_pairs = []
+            for item ,idx in zip(expert_results, indices[i]):
+                if idx == self.args.id:
+                    cosine_sim = torch.ones_like(rep_ori) 
+                else:
+                    cosine_sim = self.elementwise_cosine_similarity(rep_ori, item) 
+                
+                # Calculate energy value using calConfidence
+                energy_value = self.calConfidence(cosine_sim.unsqueeze(0))  # Pass cosine similarity as input
+                # confidence_results[energy_value.item()] = confidence_results.get(energy_value.item(), []) + [idx]
+                energy_index_pairs.append((energy_value.item(), idx)) 
+                
+            dropout_coefficient = 0.2 
+
+            energy_index_pairs.sort(key=lambda x: x[0])
+            
+            num_to_keep = int(len(indices[i]) * (1 - dropout_coefficient))  
+            
+            keep_indices = [pair[1] for pair in energy_index_pairs[:num_to_keep]]
+            
+            keep_positions = [indices[i].tolist().index(idx) for idx in keep_indices]
+            
+            filtered_expert_results = [expert_results[idx] for idx in keep_indices]
+            filtered_weight_list = weights_values[i][keep_positions]
+   
+            filter_weights_values.append(filtered_weight_list)          
+            
+            stacked_expert_results = torch.stack(filtered_expert_results) 
+            results.append(stacked_expert_results)
+            
+        final_results = torch.stack(results)  
+        weights = torch.stack(filter_weights_values)
+        weights_x = weights.unsqueeze(-1).expand_as(final_results)
+
+        return torch.sum(final_results * weights_x, dim=1) 
+
+
+class NormalToPMoE(nn.Module):
+    def __init__(self, trained_experts, gate_input_dim, args):
+        super(ToPMoE, self).__init__()
+        self.experts = nn.ModuleList(trained_experts)
+        num_experts = len(trained_experts)
+        # Assuming all experts have the same input dimension
+        self.gating = Gating(gate_input_dim, num_experts)
+        self.k = args.topk
 
     def forward(self, x):
         # Get the weights from the gating network
         weights = self.gating(x.flatten(1))  # [10,20]
         
-        weights_values, indices = torch.topk(weights, self.k, dim=-1, largest=True, sorted=True, out=None) 
+        weights_values, indices = torch.topk(weights, self.k, dim=-1, largest=True, sorted=True, out=None)
         
         # Calculate the expert
         results = []
@@ -52,13 +136,10 @@ class ToPMoE(nn.Module):
         final_results = torch.stack(results)  
         weights_x = weights_values.unsqueeze(-1).expand_as(final_results)
 
-        # outputs = torch.stack([expert(x) for expert in self.experts], dim=2)
-        # # Adjust the weights tensor shape to match the expert outputs
-        # weights = weights.unsqueeze(1).expand_as(outputs)
-
-        # Multiply the expert outputs with the weights and
-        # sum along the third dimension
         return torch.sum(final_results * weights_x, dim=1) 
+
+
+
 
 class ExtractorToPMoE(nn.Module): 
     def __init__(self, trained_experts, gate_input_dim, args):
